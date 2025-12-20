@@ -3,15 +3,18 @@ import { Settings } from 'lucide-react';
 import RepoCard from './components/RepoCard';
 import Controls from './components/Controls';
 import TokenModal from './components/TokenModal';
+import SettingsModal from './components/SettingsModal';
 import { useToken } from './context/TokenContext';
-import { searchRepos } from './utils/github';
+import { SettingsProvider } from './context/SettingsContext';
+import { searchRepos, getReadme } from './utils/github';
 import { getNextKeyword, updatePreference } from './utils/recommendations';
 
-function App() {
+function AppContent() {
   const { token } = useToken();
   const [repos, setRepos] = useState([]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isTokenModalOpen, setIsTokenModalOpen] = useState(false);
+  const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const containerRef = useRef(null);
 
@@ -40,12 +43,37 @@ function App() {
       
       if (data.items && data.items.length > 0) {
         // Filter out duplicates
-        setRepos(prev => {
-          const existingIds = new Set(prev.map(r => r.id));
-          const newRepos = data.items.filter(r => !existingIds.has(r.id));
-          // Shuffle the new batch
-          return [...prev, ...newRepos.sort(() => Math.random() - 0.5)];
-        });
+        const existingIds = new Set(repos.map(r => r.id));
+        let candidates = data.items.filter(r => !existingIds.has(r.id));
+        // Shuffle the new batch
+        candidates = candidates.sort(() => Math.random() - 0.5);
+
+        // Filter by README length (>= 100 words)
+        // Process in chunks to avoid too many parallel requests but ensure we get some results
+        const validRepos = [];
+        const CHUNK_SIZE = 5;
+        const TARGET_COUNT = 5;
+
+        for (let i = 0; i < candidates.length; i += CHUNK_SIZE) {
+          if (validRepos.length >= TARGET_COUNT) break;
+
+          const chunk = candidates.slice(i, i + CHUNK_SIZE);
+          const results = await Promise.all(chunk.map(async (repo) => {
+            try {
+              const readme = await getReadme(repo.owner.login, repo.name, token);
+              if (readme && readme.split(/\s+/).length >= 100) {
+                return { ...repo, readmeContent: readme };
+              }
+            } catch (e) {
+              // Ignore errors
+            }
+            return null;
+          }));
+
+          validRepos.push(...results.filter(r => r !== null));
+        }
+
+        setRepos(prev => [...prev, ...validRepos]);
       }
     } catch (error) {
       console.error("Failed to fetch repos", error);
@@ -108,7 +136,7 @@ function App() {
           GitScroll
         </h1>
         <button 
-          onClick={() => setIsTokenModalOpen(true)}
+          onClick={() => setIsSettingsModalOpen(true)}
           className="p-2 bg-black/50 backdrop-blur rounded-full hover:bg-gray-800 pointer-events-auto transition-colors"
         >
           <Settings size={24} />
@@ -157,7 +185,20 @@ function App() {
         isOpen={isTokenModalOpen} 
         onClose={() => setIsTokenModalOpen(false)} 
       />
+      
+      <SettingsModal
+        isOpen={isSettingsModalOpen}
+        onClose={() => setIsSettingsModalOpen(false)}
+      />
     </div>
+  );
+}
+
+function App() {
+  return (
+    <SettingsProvider>
+      <AppContent />
+    </SettingsProvider>
   );
 }
 

@@ -1,27 +1,33 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Star, GitFork, Eye, FileCode, BookOpen, ExternalLink } from 'lucide-react';
+import { Star, GitFork, Eye, FileCode, BookOpen, ExternalLink, FolderTree } from 'lucide-react';
 import ReadmeViewer from './ReadmeViewer';
 import CodeViewer from './CodeViewer';
-import { getReadme, getRandomCodeFile } from '../utils/github';
+import FileExplorer from './FileExplorer';
+import { getReadme, getRandomCodeFiles } from '../utils/github';
 import { useToken } from '../context/TokenContext';
 
 const RepoCard = ({ repo, isActive }) => {
   const { token } = useToken();
-  const [view, setView] = useState('readme'); // 'readme' or 'code'
+  const [view, setView] = useState('readme'); // 'readme', 'code', 'files'
   const [readme, setReadme] = useState(null);
-  const [codeFile, setCodeFile] = useState(null);
+  const [codeFiles, setCodeFiles] = useState([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     if (isActive && repo) {
       setLoading(true);
+      
+      const readmePromise = repo.readmeContent 
+        ? Promise.resolve(repo.readmeContent) 
+        : getReadme(repo.owner.login, repo.name, token);
+
       Promise.all([
-        getReadme(repo.owner.login, repo.name, token),
-        getRandomCodeFile(repo.owner.login, repo.name, token)
-      ]).then(([readmeContent, codeContent]) => {
+        readmePromise,
+        getRandomCodeFiles(repo.owner.login, repo.name, token)
+      ]).then(([readmeContent, files]) => {
         setReadme(readmeContent);
-        setCodeFile(codeContent);
+        setCodeFiles(files);
         setLoading(false);
       });
     }
@@ -64,11 +70,9 @@ const RepoCard = ({ repo, isActive }) => {
           </div>
         ) : (
           <div className="h-full">
-            {view === 'readme' ? (
-              <ReadmeViewer content={readme} />
-            ) : (
-              <CodeViewer file={codeFile} />
-            )}
+            {view === 'readme' && <ReadmeViewer content={readme} />}
+            {view === 'code' && <CodeViewer files={codeFiles} />}
+            {view === 'files' && <FileExplorer repo={repo} />}
           </div>
         )}
       </div>
@@ -89,6 +93,15 @@ const RepoCard = ({ repo, isActive }) => {
             view === 'code' ? 'text-blue-400 bg-gray-800/50' : 'text-gray-400 hover:bg-gray-800'
           }`}
         >
+          <FileCode size={18} /> Code
+        </button>
+        <button 
+          onClick={() => setView('files')}
+          className={`flex-1 py-3 flex items-center justify-center gap-2 text-sm font-medium transition-colors ${
+            view === 'files' ? 'text-blue-400 bg-gray-800/50' : 'text-gray-400 hover:bg-gray-800'
+          }`}
+        >
+          <FolderTree size={18} /> Files
           <FileCode size={18} /> Code
         </button>
       </div>

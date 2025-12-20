@@ -47,53 +47,63 @@ export const getRepoFiles = async (owner, repo, path = '', token) => {
   return response.json();
 };
 
-export const getRandomCodeFile = async (owner, repo, token) => {
-  // BFS or DFS to find a code file. Limit depth to avoid too many requests.
-  // For simplicity, list root, pick a folder, list that, pick a file.
+export const getRandomCodeFiles = async (owner, repo, token, count = 5) => {
+  // BFS or DFS to find code files. Limit depth to avoid too many requests.
   
   try {
     const rootFiles = await getRepoFiles(owner, repo, '', token);
-    if (!Array.isArray(rootFiles)) return null;
+    if (!Array.isArray(rootFiles)) return [];
 
     // Filter for interesting code files
-    const codeExtensions = ['.js', '.jsx', '.ts', '.tsx', '.py', '.rs', '.go', '.java', '.c', '.cpp', '.h', '.css', '.html', '.json', '.md'];
+    const codeExtensions = ['.js', '.jsx', '.ts', '.tsx', '.py', '.rs', '.go', '.java', '.c', '.cpp', '.h', '.css', '.html', '.json'];
+    const excludedPatterns = ['build', 'dist', 'config', 'license', 'package', 'lock', 'test', 'spec', 'node_modules', 'vendor', 'bin', 'obj'];
     
-    let candidates = rootFiles.filter(f => f.type === 'file' && codeExtensions.some(ext => f.name.endsWith(ext)));
+    const isInteresting = (file) => {
+      if (file.type !== 'file') return false;
+      const name = file.name.toLowerCase();
+      if (excludedPatterns.some(p => name.includes(p))) return false;
+      return codeExtensions.some(ext => name.endsWith(ext));
+    };
+
+    let candidates = rootFiles.filter(isInteresting);
     
-    // If no code files in root, try one level deep in a random folder
-    if (candidates.length === 0) {
+    // If not enough code files in root, try one level deep in random folders
+    if (candidates.length < count) {
       const folders = rootFiles.filter(f => f.type === 'dir' && !f.name.startsWith('.'));
-      if (folders.length > 0) {
-        const randomFolder = folders[Math.floor(Math.random() * folders.length)];
-        const subFiles = await getRepoFiles(owner, repo, randomFolder.path, token);
+      // Shuffle folders to explore randomly
+      const shuffledFolders = folders.sort(() => Math.random() - 0.5).slice(0, 3); // Check up to 3 folders
+      
+      for (const folder of shuffledFolders) {
+        const subFiles = await getRepoFiles(owner, repo, folder.path, token);
         if (Array.isArray(subFiles)) {
-           candidates = subFiles.filter(f => f.type === 'file' && codeExtensions.some(ext => f.name.endsWith(ext)));
+           const subCandidates = subFiles.filter(isInteresting);
+           candidates = [...candidates, ...subCandidates];
         }
+        if (candidates.length >= count * 2) break; // Stop if we have plenty
       }
     }
     
     if (candidates.length > 0) {
-      const randomFile = candidates[Math.floor(Math.random() * candidates.length)];
-      // Fetch content
-      const headers = token ? { Authorization: `token ${token}` } : {};
-      const res = await fetch(randomFile.download_url); // download_url is usually public, but for private repos (if token used) might need auth header on raw endpoint? 
-      // Actually download_url works for public. For private, use the API blob endpoint or pass token?
-      // The download_url usually redirects to raw.githubusercontent.com.
-      // If we provide a token to the API, we should probably use the API to get content to be safe with private repos if the user has access.
-      // But for this app, we are searching public repos mostly.
+      // Shuffle and pick 'count' files
+      const selectedFiles = candidates.sort(() => Math.random() - 0.5).slice(0, count);
       
-      // Better to use the API to get content (base64 encoded) to avoid CORS issues with raw.githubusercontent sometimes?
-      // Actually raw.githubusercontent usually has CORS enabled.
+      const filesWithContent = await Promise.all(selectedFiles.map(async (file) => {
+        try {
+          const contentRes = await fetch(file.download_url);
+          return {
+            name: file.name,
+            path: file.path,
+            content: await contentRes.text()
+          };
+        } catch (e) {
+          return null;
+        }
+      }));
       
-      const contentRes = await fetch(randomFile.download_url);
-      return {
-        name: randomFile.name,
-        path: randomFile.path,
-        content: await contentRes.text()
-      };
+      return filesWithContent.filter(f => f !== null);
     }
   } catch (e) {
-    console.error("Error fetching code file", e);
+    console.error("Error fetching code files", e);
   }
-  return null;
+  return [];
 };
