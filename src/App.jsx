@@ -1,0 +1,164 @@
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { Settings } from 'lucide-react';
+import RepoCard from './components/RepoCard';
+import Controls from './components/Controls';
+import TokenModal from './components/TokenModal';
+import { useToken } from './context/TokenContext';
+import { searchRepos } from './utils/github';
+import { getNextKeyword, updatePreference } from './utils/recommendations';
+
+function App() {
+  const { token } = useToken();
+  const [repos, setRepos] = useState([]);
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [isTokenModalOpen, setIsTokenModalOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const containerRef = useRef(null);
+
+  // Initial load
+  useEffect(() => {
+    if (repos.length === 0) {
+      loadMoreRepos();
+    }
+  }, []);
+
+  // Check if we need to load more when index changes
+  useEffect(() => {
+    if (repos.length - currentIndex < 5) {
+      loadMoreRepos();
+    }
+  }, [currentIndex, repos.length]);
+
+  const loadMoreRepos = async () => {
+    if (loading) return;
+    setLoading(true);
+    try {
+      const keyword = getNextKeyword();
+      // Random page 1-5 to get some variety
+      const page = Math.floor(Math.random() * 5) + 1;
+      const data = await searchRepos(keyword, token, page);
+      
+      if (data.items && data.items.length > 0) {
+        // Filter out duplicates
+        setRepos(prev => {
+          const existingIds = new Set(prev.map(r => r.id));
+          const newRepos = data.items.filter(r => !existingIds.has(r.id));
+          // Shuffle the new batch
+          return [...prev, ...newRepos.sort(() => Math.random() - 0.5)];
+        });
+      }
+    } catch (error) {
+      console.error("Failed to fetch repos", error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleScroll = useCallback(() => {
+    if (containerRef.current) {
+      const { scrollTop, clientHeight } = containerRef.current;
+      const index = Math.round(scrollTop / clientHeight);
+      if (index !== currentIndex) {
+        setCurrentIndex(index);
+      }
+    }
+  }, [currentIndex]);
+
+  const scrollToNext = () => {
+    if (containerRef.current) {
+      const { clientHeight } = containerRef.current;
+      containerRef.current.scrollTo({
+        top: (currentIndex + 1) * clientHeight,
+        behavior: 'smooth'
+      });
+    }
+  };
+
+  const handleLike = () => {
+    const currentRepo = repos[currentIndex];
+    if (currentRepo) {
+      // We don't know exactly which keyword brought this repo, 
+      // but we can guess from topics or language or just use the last used keyword?
+      // Ideally we store the keyword with the repo.
+      // For now, let's just boost the language as a proxy for keyword if it matches our list,
+      // or just rely on the fact that the user is liking *something*.
+      // A better way: attach the source keyword to the repo object when fetching.
+      
+      // Since we didn't attach it, let's just update preference for the repo's language
+      if (currentRepo.language) {
+        updatePreference(currentRepo.language.toLowerCase(), true);
+      }
+    }
+    scrollToNext();
+  };
+
+  const handleDislike = () => {
+    const currentRepo = repos[currentIndex];
+    if (currentRepo && currentRepo.language) {
+      updatePreference(currentRepo.language.toLowerCase(), false);
+    }
+    scrollToNext();
+  };
+
+  return (
+    <div className="h-screen w-full bg-black text-white relative">
+      {/* Top Bar */}
+      <div className="absolute top-0 left-0 right-0 p-4 z-50 flex justify-between items-center pointer-events-none">
+        <h1 className="text-xl font-bold bg-black/50 backdrop-blur px-3 py-1 rounded-full pointer-events-auto">
+          GitScroll
+        </h1>
+        <button 
+          onClick={() => setIsTokenModalOpen(true)}
+          className="p-2 bg-black/50 backdrop-blur rounded-full hover:bg-gray-800 pointer-events-auto transition-colors"
+        >
+          <Settings size={24} />
+        </button>
+      </div>
+
+      {/* Main Scroll Container */}
+      <div 
+        ref={containerRef}
+        onScroll={handleScroll}
+        className="h-full w-full overflow-y-scroll snap-y snap-mandatory scroll-smooth no-scrollbar"
+        style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}
+      >
+        {repos.map((repo, index) => (
+          <div key={`${repo.id}-${index}`} className="h-full w-full snap-start relative">
+            <RepoCard repo={repo} isActive={index === currentIndex} />
+          </div>
+        ))}
+        
+        {repos.length === 0 && !loading && (
+          <div className="h-full w-full flex items-center justify-center">
+            <div className="text-center">
+              <h2 className="text-2xl font-bold mb-4">Welcome to GitScroll</h2>
+              <p className="text-gray-400 mb-8">Discover random repositories.</p>
+              <button 
+                onClick={loadMoreRepos}
+                className="bg-blue-600 px-6 py-3 rounded-lg font-bold"
+              >
+                Start Scrolling
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Controls Overlay */}
+      {repos.length > 0 && (
+        <Controls 
+          onLike={handleLike} 
+          onDislike={handleDislike} 
+          onSkip={scrollToNext} 
+        />
+      )}
+
+      <TokenModal 
+        isOpen={isTokenModalOpen} 
+        onClose={() => setIsTokenModalOpen(false)} 
+      />
+    </div>
+  );
+}
+
+export default App;
