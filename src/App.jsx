@@ -18,14 +18,12 @@ function AppContent() {
   const [loading, setLoading] = useState(false);
   const containerRef = useRef(null);
 
-  // Initial load
   useEffect(() => {
     if (repos.length === 0) {
       loadMoreRepos();
     }
   }, []);
 
-  // Check if we need to load more when index changes
   useEffect(() => {
     if (repos.length - currentIndex < 5) {
       loadMoreRepos();
@@ -36,23 +34,40 @@ function AppContent() {
     if (loading) return;
     setLoading(true);
     try {
-      const keyword = getNextKeyword();
-      // Random page 1-5 to get some variety
-      const page = Math.floor(Math.random() * 5) + 1;
-      const data = await searchRepos(keyword, token, page);
+      const KEYWORDS_TO_FETCH = 3;
+      const promises = [];
       
-      if (data.items && data.items.length > 0) {
-        // Filter out duplicates
+      for (let i = 0; i < KEYWORDS_TO_FETCH; i++) {
+        const keyword = getNextKeyword();
+        const page = Math.floor(Math.random() * 5) + 1;
+        promises.push(
+          searchRepos(keyword, token, page)
+            .then(data => ({ keyword, items: data.items || [] }))
+            .catch(e => {
+              console.error(`Failed to fetch for ${keyword}`, e);
+              return { keyword, items: [] };
+            })
+        );
+      }
+      
+      const results = await Promise.all(promises);
+      
+      let allCandidates = [];
+      results.forEach(({ keyword, items }) => {
+        const itemsWithKeyword = items.map(item => ({ ...item, sourceKeyword: keyword }));
+        allCandidates.push(...itemsWithKeyword);
+      });
+      
+      if (allCandidates.length > 0) {
         const existingIds = new Set(repos.map(r => r.id));
-        let candidates = data.items.filter(r => !existingIds.has(r.id));
-        // Shuffle the new batch
+        let candidates = allCandidates.filter(r => !existingIds.has(r.id));
+
         candidates = candidates.sort(() => Math.random() - 0.5);
 
         // Filter by README length (>= 100 words)
-        // Process in chunks to avoid too many parallel requests but ensure we get some results
         const validRepos = [];
         const CHUNK_SIZE = 5;
-        const TARGET_COUNT = 5;
+        const TARGET_COUNT = 10; // Increased target count for larger batches
 
         for (let i = 0; i < candidates.length; i += CHUNK_SIZE) {
           if (validRepos.length >= TARGET_COUNT) break;
@@ -62,10 +77,10 @@ function AppContent() {
             try {
               const readme = await getReadme(repo.owner.login, repo.name, token);
               if (readme && readme.split(/\s+/).length >= 100) {
-                return { ...repo, readmeContent: readme };
+                return { ...repo, readmeContent: readme, sourceKeyword: repo.sourceKeyword };
               }
             } catch (e) {
-              // Ignore errors
+              console.error(`Failed to fetch README for ${repo.full_name}`, e);
             }
             return null;
           }));
@@ -104,26 +119,16 @@ function AppContent() {
 
   const handleLike = () => {
     const currentRepo = repos[currentIndex];
-    if (currentRepo) {
-      // We don't know exactly which keyword brought this repo, 
-      // but we can guess from topics or language or just use the last used keyword?
-      // Ideally we store the keyword with the repo.
-      // For now, let's just boost the language as a proxy for keyword if it matches our list,
-      // or just rely on the fact that the user is liking *something*.
-      // A better way: attach the source keyword to the repo object when fetching.
-      
-      // Since we didn't attach it, let's just update preference for the repo's language
-      if (currentRepo.language) {
-        updatePreference(currentRepo.language.toLowerCase(), true);
-      }
+    if (currentRepo && currentRepo.sourceKeyword) {
+      updatePreference(currentRepo.sourceKeyword, true);
     }
     scrollToNext();
   };
 
   const handleDislike = () => {
     const currentRepo = repos[currentIndex];
-    if (currentRepo && currentRepo.language) {
-      updatePreference(currentRepo.language.toLowerCase(), false);
+    if (currentRepo && currentRepo.sourceKeyword) {
+      updatePreference(currentRepo.sourceKeyword, false);
     }
     scrollToNext();
   };

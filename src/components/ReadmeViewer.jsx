@@ -1,6 +1,7 @@
 import React from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import rehypeRaw from 'rehype-raw';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 
@@ -11,6 +12,7 @@ const ReadmeViewer = ({ content }) => {
     <div className="prose prose-invert max-w-none p-4 overflow-y-auto h-full custom-scrollbar">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
+        rehypePlugins={[rehypeRaw]}
         components={{
           code({node, inline, className, children, ...props}) {
             const match = /language-(\w+)/.exec(className || '')
