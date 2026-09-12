@@ -1,41 +1,42 @@
-# GitScroll - GitHub Doomscroll
+# GitScroll
 
-A "reels-style" GitHub repository explorer. Scroll through random repositories, view their READMEs and code, and discover new projects based on your interests.
+GitScroll is a quiet, swipeable feed for discovering GitHub projects. Search results appear immediately from their lightweight metadata; README and code requests happen only when the user pauses or asks for them.
 
-## Features
+## How it works
 
-- **Infinite Scroll**: Swipe through repositories like a social media feed.
-- **Dual View**: Toggle between README and Code view for each repo.
-- **Recommendation Engine**: The app learns from your likes/dislikes to show more relevant content.
-- **GitHub Token Integration**: Add your Personal Access Token for higher rate limits and private repo access (stored locally).
-- **Mobile Friendly**: Designed for both desktop and mobile.
+- **Cheap feed cards:** one search batch supplies names, descriptions, languages, and counts. Opening every repository page is unnecessary.
+- **Dwell-based README loading:** a README is requested after the active card remains on screen for 850 ms. Fast scrolling makes no detail requests.
+- **One-request file index:** opening Files gets the repository's recursive tree once. The browser then filters and searches it locally; file content loads only after selection.
+- **Folder and content search:** files are arranged in collapsible folders. Search filters the complete path index, and an opened file has its own highlighted text search.
+- **Request reuse:** identical in-flight requests are shared, while search results, READMEs, trees, and files are cached for the browser session.
+- **Rate-limit-aware batching:** search queries run sequentially in two-query batches to avoid bursts that can trigger GitHub's secondary limiter.
 
-## Setup
+## Recommendations
 
-1.  Install dependencies:
-    ```bash
-    npm install
-    ```
+There are no embeddings or semantic-similarity weights. Feedback is kept locally as topic-presence sets and turned directly into GitHub queries:
 
-2.  Run locally:
-    ```bash
-    npm run dev
-    ```
+1. Compute liked and disliked document frequency for every topic.
+2. Score each topic with `liked DF - 1.75 × disliked DF`.
+3. Discount a small set of generic development terms.
+4. Group positive topics only when they co-occur in liked repositories.
+5. Add strong dislike-only topics as `NOT` filters.
+6. Mix personalized queries with an exploration query about 70/30.
 
-## Deployment to GitHub Pages
+Stars are bounded loosely for basic quality control, but never used to order the feed. This keeps popular projects from crowding out relevant or unusual ones.
 
-1.  Make sure your project is pushed to a GitHub repository.
-2.  Run the deploy script:
-    ```bash
-    npm run deploy
-    ```
-3.  Your site will be live at `https://<username>.github.io/<repo-name>/`.
+## Run locally
 
-## Tech Stack
+```bash
+npm install
+npm run dev
+```
 
-- React
-- Vite
-- Tailwind-like CSS
-- Framer Motion
-- React Markdown
-- React Syntax Highlighter
+Create a production build with:
+
+```bash
+npm run build
+```
+
+The optional GitHub token in Settings is stored only in local browser storage. Keyboard shortcuts are `J` or ↓ for next, `L` for more like this, and `D` for less like this.
+
+Enable **Debug controls** in Settings to tune README dwell time, batch size, result count, refill thresholds, cache behavior, sequential search execution, exploration balance, Rocchio weights, co-occurrence bundle size, negative filters, and star bounds. These values are local and apply to future requests; disabling debug controls restores the standard runtime defaults.

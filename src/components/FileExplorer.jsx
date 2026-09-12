@@ -1,164 +1,158 @@
-import React, { useState, useEffect } from 'react';
-import { Folder, File, ChevronRight, ChevronDown, FileCode, ArrowLeft } from 'lucide-react';
-import { getRepoFiles } from '../utils/github';
-import { useToken } from '../context/TokenContext';
-import { useSettings } from '../context/SettingsContext';
+import { useEffect, useMemo, useState } from 'react';
+import {
+  ArrowLeft, ChevronRight, FileCode2, Folder, FolderOpen, Search,
+} from 'lucide-react';
 import CodeViewer from './CodeViewer';
+import { useToken } from '../context/TokenContext';
+import { DEFAULT_DEBUG_SETTINGS, useDebugSettings } from '../context/DebugContext';
+import { getFileContent, getRepoTree } from '../utils/github';
+
+const CODE_EXTENSIONS = new Set([
+  'c', 'cpp', 'cs', 'css', 'go', 'h', 'html', 'java', 'js', 'json', 'jsx',
+  'kt', 'lua', 'md', 'php', 'py', 'rb', 'rs', 'sh', 'swift', 'ts', 'tsx',
+  'vue', 'yaml', 'yml',
+]);
+
+const NOISY_PATHS = /(^|\/)(dist|build|coverage|node_modules|vendor|target|\.git)(\/|$)|(?:^|\/)(package-lock|yarn\.lock|pnpm-lock)/i;
+
+const createTree = (files) => {
+  const root = { name: '', path: '', folders: new Map(), files: [] };
+
+  files.forEach((file) => {
+    const parts = file.path.split('/');
+    let node = root;
+    parts.slice(0, -1).forEach((part) => {
+      if (!node.folders.has(part)) {
+        const path = node.path ? `${node.path}/${part}` : part;
+        node.folders.set(part, { name: part, path, folders: new Map(), files: [] });
+      }
+      node = node.folders.get(part);
+    });
+    node.files.push(file);
+  });
+
+  return root;
+};
+
+const FileRow = ({ file, onOpen, depth = 0, showPath = false }) => (
+  <button className="tree-row file-row" style={{ '--depth': depth }} onClick={() => onOpen(file)}>
+    <FileCode2 size={15} />
+    <span title={file.path}>{showPath ? file.path : file.path.split('/').pop()}</span>
+    <small>{file.size ? `${Math.ceil(file.size / 1024)} KB` : ''}</small>
+  </button>
+);
+
+const FolderNode = ({ node, onOpen, depth = 0 }) => {
+  const [expanded, setExpanded] = useState(depth === 0 && ['src', 'app', 'lib'].includes(node.name));
+  const folders = [...node.folders.values()].sort((a, b) => a.name.localeCompare(b.name));
+  const files = [...node.files].sort((a, b) => a.path.localeCompare(b.path));
+
+  return (
+    <div className="tree-folder">
+      <button
+        className="tree-row folder-row"
+        style={{ '--depth': depth }}
+        onClick={() => setExpanded((value) => !value)}
+        aria-expanded={expanded}
+      >
+        <ChevronRight className={expanded ? 'chevron expanded' : 'chevron'} size={14} />
+        {expanded ? <FolderOpen size={16} /> : <Folder size={16} />}
+        <span>{node.name}</span>
+        <small>{folders.length + files.length}</small>
+      </button>
+      {expanded && (
+        <div>
+          {folders.map((folder) => <FolderNode key={folder.path} node={folder} onOpen={onOpen} depth={depth + 1} />)}
+          {files.map((file) => <FileRow key={file.path} file={file} onOpen={onOpen} depth={depth + 1} />)}
+        </div>
+      )}
+    </div>
+  );
+};
 
 const FileExplorer = ({ repo }) => {
   const { token } = useToken();
-  const { settings } = useSettings();
-  const [currentPath, setCurrentPath] = useState('');
+  const { debugSettings } = useDebugSettings();
+  const requestOptions = debugSettings.enabled ? debugSettings : DEFAULT_DEBUG_SETTINGS;
   const [files, setFiles] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [history, setHistory] = useState([]);
-  const [selectedFile, setSelectedFile] = useState(null);
+  const [query, setQuery] = useState('');
+  const [selected, setSelected] = useState(null);
+  const [status, setStatus] = useState('loading');
 
   useEffect(() => {
-    loadFiles(currentPath);
-  }, [currentPath, repo, token]);
+    let current = true;
+    setStatus('loading');
+    getRepoTree(repo, token, requestOptions)
+      .then((tree) => {
+        if (!current) return;
+        setFiles(tree.filter((file) => {
+          const extension = file.path.split('.').pop().toLowerCase();
+          return CODE_EXTENSIONS.has(extension) && !NOISY_PATHS.test(file.path);
+        }));
+        setStatus('ready');
+      })
+      .catch(() => current && setStatus('error'));
+    return () => { current = false; };
+  }, [repo, requestOptions, token]);
 
-  const loadFiles = async (path) => {
-    setLoading(true);
+  const tree = useMemo(() => createTree(files), [files]);
+  const matches = useMemo(() => {
+    const normalizedQuery = query.trim().toLowerCase();
+    if (!normalizedQuery) return [];
+    return files.filter((file) => file.path.toLowerCase().includes(normalizedQuery)).slice(0, 200);
+  }, [files, query]);
+
+  const openFile = async (file) => {
+    setSelected({ ...file, name: file.path.split('/').pop(), content: '', loading: true });
     try {
-      const data = await getRepoFiles(repo.owner.login, repo.name, path, token);
-      if (Array.isArray(data)) {
-        // Sort: folders first, then files
-        const sorted = data.sort((a, b) => {
-          if (a.type === b.type) return a.name.localeCompare(b.name);
-          return a.type === 'dir' ? -1 : 1;
-        });
-        setFiles(sorted);
-      }
-    } catch (error) {
-      console.error("Failed to load files", error);
-    } finally {
-      setLoading(false);
+      const content = await getFileContent(repo, file.path, token, requestOptions);
+      setSelected({ ...file, name: file.path.split('/').pop(), content, loading: false });
+    } catch {
+      setSelected({ ...file, name: file.path.split('/').pop(), content: '// This file could not be loaded.', loading: false });
     }
   };
 
-  const handleFolderClick = (folderName) => {
-    setHistory([...history, currentPath]);
-    setCurrentPath(currentPath ? `${currentPath}/${folderName}` : folderName);
-  };
-
-  const handleBack = () => {
-    if (selectedFile) {
-      setSelectedFile(null);
-      return;
-    }
-    
-    if (history.length > 0) {
-      const prevPath = history[history.length - 1];
-      setHistory(history.slice(0, -1));
-      setCurrentPath(prevPath);
-    }
-  };
-
-  const handleFileClick = async (file) => {
-    setLoading(true);
-    try {
-      const res = await fetch(file.download_url);
-      const content = await res.text();
-      setSelectedFile({
-        name: file.name,
-        path: file.path,
-        content: content
-      });
-    } catch (e) {
-      console.error("Failed to fetch file content", e);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const isHidden = (file) => {
-    if (!settings.hideConfig) return false;
-    const name = file.name.toLowerCase();
-    const excludedPatterns = ['build', 'dist', 'config', 'license', 'package', 'lock', 'test', 'spec', 'node_modules', 'vendor', 'bin', 'obj', '.git', '.github', '.vscode', '.idea'];
-    return excludedPatterns.some(p => name.includes(p));
-  };
-
-  const filteredFiles = files.filter(f => !isHidden(f));
-
-  if (selectedFile) {
+  if (selected) {
     return (
-      <div className="h-full flex flex-col">
-        <div className="bg-[#1a1a1a] border-b border-gray-800 p-2 flex items-center gap-2">
-          <button 
-            onClick={() => setSelectedFile(null)}
-            className="p-1 hover:bg-gray-700 rounded text-gray-400 hover:text-white"
-          >
-            <ArrowLeft size={18} />
-          </button>
-          <span className="text-sm font-mono text-gray-300 truncate">{selectedFile.path}</span>
-        </div>
-        <div className="flex-1 overflow-hidden">
-          <CodeViewer files={[selectedFile]} />
-        </div>
+      <div className="file-viewer">
+        <button className="back-button" onClick={() => setSelected(null)}>
+          <ArrowLeft size={16} /> Files
+        </button>
+        {selected.loading
+          ? <div className="preview-state"><span className="spinner" /><p>Loading file…</p></div>
+          : <CodeViewer inlineFile={selected} />}
       </div>
     );
   }
 
-  return (
-    <div className="h-full flex flex-col bg-[#1a1a1a]">
-      {/* Breadcrumbs / Header */}
-      <div className="p-3 border-b border-gray-800 flex items-center gap-2 text-sm text-gray-400 overflow-x-auto whitespace-nowrap">
-        {currentPath !== '' && (
-          <button 
-            onClick={handleBack}
-            className="p-1 hover:bg-gray-700 rounded mr-1"
-          >
-            <ArrowLeft size={16} />
-          </button>
-        )}
-        <span 
-          className="cursor-pointer hover:text-white"
-          onClick={() => {
-            setCurrentPath('');
-            setHistory([]);
-          }}
-        >
-          {repo.name}
-        </span>
-        {currentPath.split('/').map((part, i, arr) => (
-          <React.Fragment key={i}>
-            <ChevronRight size={14} />
-            <span className="cursor-default text-gray-200">{part}</span>
-          </React.Fragment>
-        ))}
-      </div>
+  const rootFolders = [...tree.folders.values()].sort((a, b) => a.name.localeCompare(b.name));
 
-      {/* File List */}
-      <div className="flex-1 overflow-y-auto custom-scrollbar p-2">
-        {loading ? (
-          <div className="flex justify-center p-8">
-            <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500"></div>
-          </div>
-        ) : (
-          <div className="space-y-1">
-            {filteredFiles.length === 0 && (
-              <div className="text-center text-gray-500 py-8 text-sm">No files found</div>
-            )}
-            {filteredFiles.map((file) => (
-              <div 
-                key={file.sha}
-                onClick={() => file.type === 'dir' ? handleFolderClick(file.name) : handleFileClick(file)}
-                className="flex items-center gap-3 p-2 rounded hover:bg-gray-800 cursor-pointer group transition-colors"
-              >
-                {file.type === 'dir' ? (
-                  <Folder size={18} className="text-blue-400 group-hover:text-blue-300" />
-                ) : (
-                  <FileCode size={18} className="text-gray-400 group-hover:text-gray-300" />
-                )}
-                <span className="text-sm text-gray-300 group-hover:text-white truncate">
-                  {file.name}
-                </span>
-              </div>
-            ))}
-          </div>
-        )}
+  return (
+    <div className="file-browser">
+      <div className="file-search">
+        <Search size={16} />
+        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search files and folders" aria-label="Search files and folders" />
       </div>
+      {status === 'loading' && <div className="preview-state"><span className="spinner" /><p>Loading the file index once…</p></div>}
+      {status === 'error' && <div className="empty-state">The file index could not be loaded.</div>}
+      {status === 'ready' && (
+        <div className="file-tree">
+          {query.trim() ? (
+            <>
+              <div className="search-count">{matches.length} matching files</div>
+              {matches.map((file) => <FileRow key={file.path} file={file} onOpen={openFile} showPath />)}
+              {!matches.length && <div className="empty-state">No matching files.</div>}
+            </>
+          ) : (
+            <>
+              {rootFolders.map((folder) => <FolderNode key={folder.path} node={folder} onOpen={openFile} />)}
+              {[...tree.files].sort((a, b) => a.path.localeCompare(b.path)).map((file) => (
+                <FileRow key={file.path} file={file} onOpen={openFile} />
+              ))}
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 };

@@ -1,209 +1,174 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Settings } from 'lucide-react';
 import RepoCard from './components/RepoCard';
-import Controls from './components/Controls';
-import TokenModal from './components/TokenModal';
 import SettingsModal from './components/SettingsModal';
 import { useToken } from './context/TokenContext';
-import { SettingsProvider } from './context/SettingsContext';
-import { searchRepos, getReadme } from './utils/github';
-import { getNextKeyword, updatePreference } from './utils/recommendations';
+import { DEFAULT_DEBUG_SETTINGS, useDebugSettings } from './context/DebugContext';
+import { searchRepositoryBatch } from './utils/github';
+import { buildSearchPlan, enrichPreference, recordPreference } from './utils/recommendations';
 
-function AppContent() {
+const interleaveResults = (batches, seenIds) => {
+  const queues = batches.map((batch) => batch.items
+    .filter((repo) => !repo.fork && !repo.archived && !repo.disabled)
+    .map((repo) => ({ ...repo, discoveryMode: batch.mode })));
+  const mixed = [];
+
+  while (queues.some((queue) => queue.length)) {
+    queues.forEach((queue) => {
+      const repo = queue.shift();
+      if (repo && !seenIds.has(repo.id)) {
+        seenIds.add(repo.id);
+        mixed.push(repo);
+      }
+    });
+  }
+  return mixed;
+};
+
+const errorMessage = (error) => {
+  if (error?.resetAt) {
+    return `GitHub's limit resets around ${error.resetAt.toLocaleTimeString([], {
+      hour: 'numeric', minute: '2-digit',
+    })}. You can also add a token in Settings.`;
+  }
+  return error?.message || 'Could not load repositories. Please try again.';
+};
+
+function App() {
   const { token } = useToken();
+  const { debugSettings } = useDebugSettings();
   const [repos, setRepos] = useState([]);
   const [currentIndex, setCurrentIndex] = useState(0);
-  const [isTokenModalOpen, setIsTokenModalOpen] = useState(false);
-  const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
   const [loading, setLoading] = useState(false);
-  const containerRef = useRef(null);
+  const [error, setError] = useState('');
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const feedRef = useRef(null);
+  const seenIds = useRef(new Set());
+  const searchCycle = useRef(0);
+  const loadingRef = useRef(false);
+  const debugRef = useRef(DEFAULT_DEBUG_SETTINGS);
 
   useEffect(() => {
-    if (repos.length === 0) {
-      loadMoreRepos();
+    debugRef.current = debugSettings.enabled ? debugSettings : DEFAULT_DEBUG_SETTINGS;
+  }, [debugSettings]);
+
+  const loadMore = useCallback(async () => {
+    if (loadingRef.current) return;
+    loadingRef.current = true;
+    setLoading(true);
+    setError('');
+
+    try {
+      const options = debugRef.current;
+      const plan = buildSearchPlan(searchCycle.current, options.batchQueryCount, options);
+      searchCycle.current += plan.length;
+      const batches = await searchRepositoryBatch(plan, token, options);
+      const candidates = interleaveResults(batches, seenIds.current);
+      setRepos((existing) => [...existing, ...candidates]);
+      if (!candidates.length) setError('No new repositories found. Try again for another batch.');
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    } finally {
+      loadingRef.current = false;
+      setLoading(false);
     }
+  }, [token]);
+
+  useEffect(() => {
+    loadMore();
+  }, [loadMore]);
+
+  useEffect(() => {
+    const threshold = (debugSettings.enabled ? debugSettings : DEFAULT_DEBUG_SETTINGS).prefetchThreshold;
+    if (repos.length && repos.length - currentIndex < threshold) loadMore();
+  }, [currentIndex, debugSettings, loadMore, repos.length]);
+
+  const moveTo = useCallback((index) => {
+    const safeIndex = Math.max(0, Math.min(index, repos.length - 1));
+    feedRef.current?.scrollTo({
+      top: safeIndex * feedRef.current.clientHeight,
+      behavior: 'smooth',
+    });
+  }, [repos.length]);
+
+  const next = useCallback(() => moveTo(currentIndex + 1), [currentIndex, moveTo]);
+
+  const rateRepo = useCallback((liked) => {
+    const repo = repos[currentIndex];
+    if (!repo) return;
+    recordPreference(repo, liked, repo.readmeContent || '');
+    next();
+  }, [currentIndex, next, repos]);
+
+  const handleHydrated = useCallback((repo, readme) => {
+    setRepos((current) => current.map((item) => (
+      item.id === repo.id ? { ...item, readmeContent: readme } : item
+    )));
+    enrichPreference(repo, readme);
   }, []);
 
   useEffect(() => {
-    if (repos.length - currentIndex < 5) {
-      loadMoreRepos();
-    }
-  }, [currentIndex, repos.length]);
+    const handleKey = (event) => {
+      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return;
+      if (event.key === 'ArrowDown' || event.key.toLowerCase() === 'j') next();
+      if (event.key.toLowerCase() === 'l') rateRepo(true);
+      if (event.key.toLowerCase() === 'd') rateRepo(false);
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [next, rateRepo]);
 
-  const loadMoreRepos = async () => {
-    if (loading) return;
-    setLoading(true);
-    try {
-      const KEYWORDS_TO_FETCH = 3;
-      const promises = [];
-      
-      for (let i = 0; i < KEYWORDS_TO_FETCH; i++) {
-        const keyword = getNextKeyword();
-        const page = Math.floor(Math.random() * 5) + 1;
-        promises.push(
-          searchRepos(keyword, token, page)
-            .then(data => ({ keyword, items: data.items || [] }))
-            .catch(e => {
-              console.error(`Failed to fetch for ${keyword}`, e);
-              return { keyword, items: [] };
-            })
-        );
-      }
-      
-      const results = await Promise.all(promises);
-      
-      let allCandidates = [];
-      results.forEach(({ keyword, items }) => {
-        const itemsWithKeyword = items.map(item => ({ ...item, sourceKeyword: keyword }));
-        allCandidates.push(...itemsWithKeyword);
-      });
-      
-      if (allCandidates.length > 0) {
-        const existingIds = new Set(repos.map(r => r.id));
-        let candidates = allCandidates.filter(r => !existingIds.has(r.id));
-
-        candidates = candidates.sort(() => Math.random() - 0.5);
-
-        // Filter by README length (>= 100 words)
-        const validRepos = [];
-        const CHUNK_SIZE = 5;
-        const TARGET_COUNT = 10; // Increased target count for larger batches
-
-        for (let i = 0; i < candidates.length; i += CHUNK_SIZE) {
-          if (validRepos.length >= TARGET_COUNT) break;
-
-          const chunk = candidates.slice(i, i + CHUNK_SIZE);
-          const results = await Promise.all(chunk.map(async (repo) => {
-            try {
-              const readme = await getReadme(repo.owner.login, repo.name, token);
-              if (readme && readme.split(/\s+/).length >= 100) {
-                return { ...repo, readmeContent: readme, sourceKeyword: repo.sourceKeyword };
-              }
-            } catch (e) {
-              console.error(`Failed to fetch README for ${repo.full_name}`, e);
-            }
-            return null;
-          }));
-
-          validRepos.push(...results.filter(r => r !== null));
-        }
-
-        setRepos(prev => [...prev, ...validRepos]);
-      }
-    } catch (error) {
-      console.error("Failed to fetch repos", error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleScroll = useCallback(() => {
-    if (containerRef.current) {
-      const { scrollTop, clientHeight } = containerRef.current;
-      const index = Math.round(scrollTop / clientHeight);
-      if (index !== currentIndex) {
-        setCurrentIndex(index);
-      }
-    }
-  }, [currentIndex]);
-
-  const scrollToNext = () => {
-    if (containerRef.current) {
-      const { clientHeight } = containerRef.current;
-      containerRef.current.scrollTo({
-        top: (currentIndex + 1) * clientHeight,
-        behavior: 'smooth'
-      });
-    }
-  };
-
-  const handleLike = () => {
-    const currentRepo = repos[currentIndex];
-    if (currentRepo && currentRepo.sourceKeyword) {
-      updatePreference(currentRepo.sourceKeyword, true);
-    }
-    scrollToNext();
-  };
-
-  const handleDislike = () => {
-    const currentRepo = repos[currentIndex];
-    if (currentRepo && currentRepo.sourceKeyword) {
-      updatePreference(currentRepo.sourceKeyword, false);
-    }
-    scrollToNext();
+  const handleScroll = () => {
+    const feed = feedRef.current;
+    if (!feed) return;
+    setCurrentIndex(Math.round(feed.scrollTop / feed.clientHeight));
   };
 
   return (
-    <div className="h-screen w-full bg-black text-white relative">
-      {/* Top Bar */}
-      <div className="absolute top-0 left-0 right-0 p-4 z-50 flex justify-between items-center pointer-events-none">
-        <h1 className="text-xl font-bold bg-black/50 backdrop-blur px-3 py-1 rounded-full pointer-events-auto">
-          GitScroll
-        </h1>
-        <button 
-          onClick={() => setIsSettingsModalOpen(true)}
-          className="p-2 bg-black/50 backdrop-blur rounded-full hover:bg-gray-800 pointer-events-auto transition-colors"
-        >
-          <Settings size={24} />
-        </button>
-      </div>
+    <main className="app-shell">
+      <header className="topbar">
+        <div className="brand" aria-label="GitScroll home">
+          <span className="brand-mark" aria-hidden="true" />
+          <span>GitScroll</span>
+        </div>
+        <div className="topbar-meta">
+          {repos.length > 0 && <span>{currentIndex + 1} / {repos.length}</span>}
+          <button className="icon-button" onClick={() => setSettingsOpen(true)} aria-label="Open settings">
+            <Settings size={19} />
+          </button>
+        </div>
+      </header>
 
-      {/* Main Scroll Container */}
-      <div 
-        ref={containerRef}
-        onScroll={handleScroll}
-        className="h-full w-full overflow-y-scroll snap-y snap-mandatory scroll-smooth no-scrollbar"
-        style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}
-      >
+      <section ref={feedRef} onScroll={handleScroll} className="feed" aria-label="Repository feed">
         {repos.map((repo, index) => (
-          <div key={`${repo.id}-${index}`} className="h-full w-full snap-start relative">
-            <RepoCard repo={repo} isActive={index === currentIndex} />
-          </div>
+          <article className="feed-page" key={repo.id}>
+            {Math.abs(index - currentIndex) <= 2 && (
+              <RepoCard
+                repo={repo}
+                isActive={index === currentIndex}
+                onLike={() => rateRepo(true)}
+                onDislike={() => rateRepo(false)}
+                onNext={next}
+                onHydrated={handleHydrated}
+              />
+            )}
+          </article>
         ))}
-        
-        {repos.length === 0 && !loading && (
-          <div className="h-full w-full flex items-center justify-center">
-            <div className="text-center">
-              <h2 className="text-2xl font-bold mb-4">Welcome to GitScroll</h2>
-              <p className="text-gray-400 mb-8">Discover random repositories.</p>
-              <button 
-                onClick={loadMoreRepos}
-                className="bg-blue-600 px-6 py-3 rounded-lg font-bold"
-              >
-                Start Scrolling
-              </button>
+
+        {(loading || error) && (
+          <div className="feed-page feed-status">
+            <div className="status-card" role={error ? 'alert' : 'status'}>
+              {loading && <span className="spinner" aria-hidden="true" />}
+              <h1>{loading ? 'Finding good projects' : 'The feed paused'}</h1>
+              <p>{loading ? 'Searching in a small, rate-limit-friendly batch…' : error}</p>
+              {!loading && <button className="primary-button" onClick={loadMore}>Try again</button>}
             </div>
           </div>
         )}
-      </div>
+      </section>
 
-      {/* Controls Overlay */}
-      {repos.length > 0 && (
-        <Controls 
-          onLike={handleLike} 
-          onDislike={handleDislike} 
-          onSkip={scrollToNext} 
-        />
-      )}
-
-      <TokenModal 
-        isOpen={isTokenModalOpen} 
-        onClose={() => setIsTokenModalOpen(false)} 
-      />
-      
-      <SettingsModal
-        isOpen={isSettingsModalOpen}
-        onClose={() => setIsSettingsModalOpen(false)}
-      />
-    </div>
-  );
-}
-
-function App() {
-  return (
-    <SettingsProvider>
-      <AppContent />
-    </SettingsProvider>
+      <SettingsModal isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} />
+    </main>
   );
 }
 

@@ -1,69 +1,46 @@
-import React, { useState } from 'react';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { useMemo, useState } from 'react';
+import { Search, WrapText } from 'lucide-react';
 
-const CodeViewer = ({ files = [] }) => {
-  const [currentIndex, setCurrentIndex] = useState(0);
+const escapePattern = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-  if (!files || files.length === 0) return <div className="p-8 text-center text-gray-500">No code files found</div>;
+const CodeViewer = ({ inlineFile, compact = false }) => {
+  const [wrap, setWrap] = useState(true);
+  const [query, setQuery] = useState('');
+  const file = inlineFile;
 
-  const file = files[currentIndex];
+  const highlighted = useMemo(() => {
+    if (!query) return { parts: [file?.content || ''], count: 0 };
+    const pattern = new RegExp(`(${escapePattern(query)})`, 'gi');
+    const parts = (file?.content || '').split(pattern);
+    return { parts, count: Math.floor(parts.length / 2) };
+  }, [file?.content, query]);
 
-  const nextFile = () => {
-    setCurrentIndex((prev) => (prev + 1) % files.length);
-  };
-
-  const prevFile = () => {
-    setCurrentIndex((prev) => (prev - 1 + files.length) % files.length);
-  };
-
-  const getLanguage = (filename) => {
-    const ext = filename.split('.').pop();
-    const map = {
-      js: 'javascript', jsx: 'jsx', ts: 'typescript', tsx: 'tsx',
-      py: 'python', rs: 'rust', go: 'go', java: 'java',
-      c: 'c', cpp: 'cpp', h: 'cpp', css: 'css', html: 'html',
-      json: 'json', md: 'markdown'
-    };
-    return map[ext] || 'text';
-  };
+  if (!file) return <div className="empty-state">Choose a file to read it.</div>;
 
   return (
-    <div className="h-full flex flex-col">
-      <div className="bg-[#1a1a1a] border-b border-gray-800 p-2 px-4 text-sm font-mono text-gray-400 flex items-center justify-between">
-        <span className="truncate flex-1 mr-4">{file.path}</span>
-        
-        {files.length > 1 && (
-          <div className="flex items-center gap-2 shrink-0">
-            <span className="text-xs text-gray-500 mr-2">{currentIndex + 1} / {files.length}</span>
-            <button 
-              onClick={prevFile}
-              className="p-1 hover:bg-gray-700 rounded transition-colors"
-              title="Previous file"
-            >
-              <ChevronLeft size={16} />
-            </button>
-            <button 
-              onClick={nextFile}
-              className="p-1 hover:bg-gray-700 rounded transition-colors"
-              title="Next file"
-            >
-              <ChevronRight size={16} />
+    <div className={compact ? 'code-block compact' : 'code-block'}>
+      {!compact && (
+        <div className="code-toolbar">
+          <span title={file.path}>{file.path}</span>
+          <div className="code-tools">
+            <label className="code-search">
+              <Search size={14} />
+              <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Find in file" aria-label="Find in file" />
+              {query && <small>{highlighted.count}</small>}
+            </label>
+            <button className={wrap ? 'active' : ''} onClick={() => setWrap((value) => !value)} aria-label="Toggle line wrapping">
+              <WrapText size={16} /> Wrap
             </button>
           </div>
-        )}
-      </div>
-      <div className="flex-1 overflow-y-auto custom-scrollbar">
-        <SyntaxHighlighter
-          language={getLanguage(file.name)}
-          style={vscDarkPlus}
-          customStyle={{ margin: 0, borderRadius: 0, height: '100%' }}
-          showLineNumbers={true}
-        >
-          {file.content}
-        </SyntaxHighlighter>
-      </div>
+        </div>
+      )}
+      <pre className={wrap ? 'code-content wraps' : 'code-content'}>
+        <code>
+          {highlighted.parts.map((part, index) => (
+            query && index % 2 === 1 ? <mark key={`${part}-${index}`}>{part}</mark> : part
+          ))}
+        </code>
+      </pre>
     </div>
   );
 };

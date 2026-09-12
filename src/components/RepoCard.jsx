@@ -1,110 +1,101 @@
-import React, { useState, useEffect } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
-import { Star, GitFork, Eye, FileCode, BookOpen, ExternalLink, FolderTree } from 'lucide-react';
-import ReadmeViewer from './ReadmeViewer';
-import CodeViewer from './CodeViewer';
+import { useEffect, useState } from 'react';
+import { BookOpen, ExternalLink, Files, GitFork, Star } from 'lucide-react';
+import Controls from './Controls';
 import FileExplorer from './FileExplorer';
-import { getReadme, getRandomCodeFiles } from '../utils/github';
+import ReadmeViewer from './ReadmeViewer';
 import { useToken } from '../context/TokenContext';
+import { DEFAULT_DEBUG_SETTINGS, useDebugSettings } from '../context/DebugContext';
+import { getReadme } from '../utils/github';
 
-const RepoCard = ({ repo, isActive }) => {
+const compactNumber = new Intl.NumberFormat('en', { notation: 'compact' });
+
+const RepoCard = ({ repo, isActive, onLike, onDislike, onNext, onHydrated }) => {
   const { token } = useToken();
-  const [view, setView] = useState('readme'); // 'readme', 'code', 'files'
-  const [readme, setReadme] = useState(null);
-  const [codeFiles, setCodeFiles] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const { debugSettings } = useDebugSettings();
+  const requestOptions = debugSettings.enabled ? debugSettings : DEFAULT_DEBUG_SETTINGS;
+  const [view, setView] = useState('readme');
+  const [readme, setReadme] = useState(repo.readmeContent || null);
+  const [status, setStatus] = useState(repo.readmeContent ? 'ready' : 'waiting');
 
   useEffect(() => {
-    if (isActive && repo) {
-      setLoading(true);
-      
-      const readmePromise = repo.readmeContent 
-        ? Promise.resolve(repo.readmeContent) 
-        : getReadme(repo.owner.login, repo.name, token);
+    setView('readme');
+    setReadme(repo.readmeContent || null);
+    setStatus(repo.readmeContent ? 'ready' : 'waiting');
+  }, [repo.id, repo.readmeContent]);
 
-      Promise.all([
-        readmePromise,
-        getRandomCodeFiles(repo.owner.login, repo.name, token)
-      ]).then(([readmeContent, files]) => {
-        setReadme(readmeContent);
-        setCodeFiles(files);
-        setLoading(false);
-      });
-    }
-  }, [isActive, repo, token]);
+  useEffect(() => {
+    if (!isActive || readme !== null || status !== 'waiting') return undefined;
 
-  if (!repo) return null;
+    const dwellTimer = window.setTimeout(async () => {
+      setStatus('loading');
+      try {
+        const content = await getReadme(repo, token, requestOptions);
+        setReadme(content || '');
+        setStatus(content ? 'ready' : 'missing');
+        onHydrated(repo, content || '');
+      } catch {
+        setStatus('error');
+      }
+    }, requestOptions.lazyLoadDelayMs);
+
+    return () => window.clearTimeout(dwellTimer);
+  }, [isActive, onHydrated, readme, repo, requestOptions, status, token]);
+
+  const previewTitle = status === 'waiting'
+    ? 'Pause to preview'
+    : status === 'loading' ? 'Loading README' : 'README unavailable';
+
+  const previewCopy = status === 'waiting'
+    ? 'The README loads after a brief pause, saving requests while you scroll.'
+    : status === 'error'
+      ? 'GitHub could not return this README right now.'
+      : status === 'missing'
+        ? 'This project does not have a readable README.'
+        : 'Fetching only what you chose to view…';
 
   return (
-    <div className="h-full w-full flex flex-col bg-[#242424] text-white overflow-hidden relative">
-      {/* Header */}
-      <div className="p-4 pt-20 border-b border-gray-800 bg-[#1a1a1a] z-10">
-        <div className="flex justify-between items-start">
-          <div className="min-w-0 flex-1">
-            <h2 className="text-xl font-bold truncate pr-4">{repo.full_name}</h2>
-            <p className="text-sm text-gray-400 truncate">{repo.description}</p>
-          </div>
-          <a 
-            href={repo.html_url} 
-            target="_blank" 
-            rel="noopener noreferrer"
-            className="p-2 hover:bg-gray-700 rounded-full transition-colors"
-          >
-            <ExternalLink size={20} />
-          </a>
+    <div className="repo-card">
+      <header className="repo-header">
+        <div className="repo-heading">
+          <div className="eyebrow">{repo.discoveryMode === 'for-you' ? 'For you' : 'Explore'}</div>
+          <h1>{repo.full_name}</h1>
+          <p>{repo.description || 'No description provided.'}</p>
         </div>
-        
-        <div className="flex gap-4 mt-3 text-sm text-gray-400">
-          <span className="flex items-center gap-1"><Star size={14} /> {repo.stargazers_count}</span>
-          <span className="flex items-center gap-1"><GitFork size={14} /> {repo.forks_count}</span>
-          <span className="flex items-center gap-1"><Eye size={14} /> {repo.watchers_count}</span>
-          <span className="bg-gray-800 px-2 py-0.5 rounded text-xs">{repo.language}</span>
+        <a className="icon-button" href={repo.html_url} target="_blank" rel="noreferrer" aria-label={`Open ${repo.full_name} on GitHub`}>
+          <ExternalLink size={18} />
+        </a>
+        <div className="repo-facts" aria-label="Repository details">
+          {repo.language && <span className="language-pill">{repo.language}</span>}
+          <span><Star size={15} /> {compactNumber.format(repo.stargazers_count)}</span>
+          <span><GitFork size={15} /> {compactNumber.format(repo.forks_count)}</span>
+          {repo.license?.spdx_id && repo.license.spdx_id !== 'NOASSERTION' && <span>{repo.license.spdx_id}</span>}
         </div>
-      </div>
+      </header>
 
-      {/* Content Area */}
-      <div className="flex-1 relative overflow-hidden">
-        {loading ? (
-          <div className="absolute inset-0 flex items-center justify-center">
-            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white"></div>
-          </div>
+      <nav className="view-tabs" aria-label="Repository content">
+        <button className={view === 'readme' ? 'active' : ''} onClick={() => setView('readme')}>
+          <BookOpen size={16} /> README
+        </button>
+        <button className={view === 'files' ? 'active' : ''} onClick={() => setView('files')}>
+          <Files size={16} /> Files
+        </button>
+      </nav>
+
+      <section className="repo-content">
+        {view === 'files' ? (
+          <FileExplorer repo={repo} />
+        ) : status === 'ready' ? (
+          <ReadmeViewer content={readme} repo={repo} />
         ) : (
-          <div className="h-full">
-            {view === 'readme' && <ReadmeViewer content={readme} />}
-            {view === 'code' && <CodeViewer files={codeFiles} />}
-            {view === 'files' && <FileExplorer repo={repo} />}
+          <div className="preview-state">
+            {status === 'loading' && <span className="spinner" aria-hidden="true" />}
+            <h2>{previewTitle}</h2>
+            <p>{previewCopy}</p>
           </div>
         )}
-      </div>
+      </section>
 
-      {/* View Toggle Tabs */}
-      <div className="flex border-t border-gray-800 bg-[#1a1a1a]">
-        <button 
-          onClick={() => setView('readme')}
-          className={`flex-1 py-3 flex items-center justify-center gap-2 text-sm font-medium transition-colors ${
-            view === 'readme' ? 'text-blue-400 bg-gray-800/50' : 'text-gray-400 hover:bg-gray-800'
-          }`}
-        >
-          <BookOpen size={18} /> README
-        </button>
-        <button 
-          onClick={() => setView('code')}
-          className={`flex-1 py-3 flex items-center justify-center gap-2 text-sm font-medium transition-colors ${
-            view === 'code' ? 'text-blue-400 bg-gray-800/50' : 'text-gray-400 hover:bg-gray-800'
-          }`}
-        >
-          <FileCode size={18} /> Code
-        </button>
-        <button 
-          onClick={() => setView('files')}
-          className={`flex-1 py-3 flex items-center justify-center gap-2 text-sm font-medium transition-colors ${
-            view === 'files' ? 'text-blue-400 bg-gray-800/50' : 'text-gray-400 hover:bg-gray-800'
-          }`}
-        >
-          <FolderTree size={18} /> Files
-          <FileCode size={18} /> Code
-        </button>
-      </div>
+      <Controls onLike={onLike} onDislike={onDislike} onNext={onNext} />
     </div>
   );
 };

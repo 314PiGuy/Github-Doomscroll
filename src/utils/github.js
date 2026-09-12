@@ -1,109 +1,161 @@
-const BASE_URL = 'https://api.github.com';
+const API_URL = 'https://api.github.com';
+const memoryCache = new Map();
+const pendingRequests = new Map();
 
-export const searchRepos = async (keyword, token, page = 1) => {
-  const headers = token ? { Authorization: `token ${token}` } : {};
-  // Sort by updated to get somewhat fresh stuff, or stars? 
-  // Randomness is better achieved by random pages or random sorts if possible.
-  // GitHub API doesn't support random sort.
-  // We can sort by 'stars', 'forks', 'updated', 'help-wanted-issues'.
-  // Let's pick a random sort order each time? Or just default to 'stars' for quality?
-  // User wants "random repositories".
-  
-  const sorts = ['stars', 'forks', 'updated'];
-  const sort = sorts[Math.floor(Math.random() * sorts.length)];
-  
-  const response = await fetch(
-    `${BASE_URL}/search/repositories?q=${keyword}&sort=${sort}&per_page=30&page=${page}`,
-    { headers }
-  );
-  
-  if (!response.ok) {
-    throw new Error(`GitHub API Error: ${response.statusText}`);
+export class GitHubApiError extends Error {
+  constructor(message, status, resetAt) {
+    super(message);
+    this.name = 'GitHubApiError';
+    this.status = status;
+    this.resetAt = resetAt;
   }
-  
-  return response.json();
-};
+}
 
-export const getReadme = async (owner, repo, token) => {
-  const headers = token ? { Authorization: `token ${token}` } : {};
-  // Try to get README.md specifically or let GitHub auto-resolve
-  const response = await fetch(
-    `${BASE_URL}/repos/${owner}/${repo}/readme`,
-    { headers: { ...headers, Accept: 'application/vnd.github.raw' } }
-  );
-  
-  if (!response.ok) return null;
-  return response.text();
-};
+const cacheKey = (url, token) => `${token ? 'auth' : 'public'}:${url}`;
 
-export const getRepoFiles = async (owner, repo, path = '', token) => {
-  const headers = token ? { Authorization: `token ${token}` } : {};
-  const response = await fetch(
-    `${BASE_URL}/repos/${owner}/${repo}/contents/${path}`,
-    { headers }
-  );
-  
-  if (!response.ok) return [];
-  return response.json();
-};
+const getCached = (key) => {
+  const inMemory = memoryCache.get(key);
+  if (inMemory?.expiresAt > Date.now()) return inMemory.value;
 
-export const getRandomCodeFiles = async (owner, repo, token, count = 5) => {
-  // BFS or DFS to find code files. Limit depth to avoid too many requests.
-  
   try {
-    const rootFiles = await getRepoFiles(owner, repo, '', token);
-    if (!Array.isArray(rootFiles)) return [];
-
-    // Filter for interesting code files
-    const codeExtensions = ['.js', '.jsx', '.ts', '.tsx', '.py', '.rs', '.go', '.java', '.c', '.cpp', '.h', '.css', '.html', '.json'];
-    const excludedPatterns = ['build', 'dist', 'config', 'license', 'package', 'lock', 'test', 'spec', 'node_modules', 'vendor', 'bin', 'obj'];
-    
-    const isInteresting = (file) => {
-      if (file.type !== 'file') return false;
-      const name = file.name.toLowerCase();
-      if (excludedPatterns.some(p => name.includes(p))) return false;
-      return codeExtensions.some(ext => name.endsWith(ext));
-    };
-
-    let candidates = rootFiles.filter(isInteresting);
-    
-    // If not enough code files in root, try one level deep in random folders
-    if (candidates.length < count) {
-      const folders = rootFiles.filter(f => f.type === 'dir' && !f.name.startsWith('.'));
-      // Shuffle folders to explore randomly
-      const shuffledFolders = folders.sort(() => Math.random() - 0.5).slice(0, 3); // Check up to 3 folders
-      
-      for (const folder of shuffledFolders) {
-        const subFiles = await getRepoFiles(owner, repo, folder.path, token);
-        if (Array.isArray(subFiles)) {
-           const subCandidates = subFiles.filter(isInteresting);
-           candidates = [...candidates, ...subCandidates];
-        }
-        if (candidates.length >= count * 2) break; // Stop if we have plenty
-      }
+    const stored = JSON.parse(sessionStorage.getItem(`github-cache:${key}`));
+    if (stored?.expiresAt > Date.now()) {
+      memoryCache.set(key, stored);
+      return stored.value;
     }
-    
-    if (candidates.length > 0) {
-      // Shuffle and pick 'count' files
-      const selectedFiles = candidates.sort(() => Math.random() - 0.5).slice(0, count);
-      
-      const filesWithContent = await Promise.all(selectedFiles.map(async (file) => {
-        try {
-          const contentRes = await fetch(file.download_url);
-          return {
-            name: file.name,
-            path: file.path,
-            content: await contentRes.text()
-          };
-        } catch (e) {
-          return null;
-        }
-      }));
-      
-      return filesWithContent.filter(f => f !== null);
-    }
-  } catch (e) {
-    console.error("Error fetching code files", e);
+  } catch {
+    // Storage can be unavailable or full; the in-memory cache still works.
   }
-  return [];
+  return undefined;
+};
+
+const setCached = (key, value, ttl) => {
+  const entry = { value, expiresAt: Date.now() + ttl };
+  memoryCache.set(key, entry);
+  try {
+    sessionStorage.setItem(`github-cache:${key}`, JSON.stringify(entry));
+  } catch {
+    // Large READMEs and private browsing may exceed session storage.
+  }
+};
+
+const githubRequest = async (path, {
+  token,
+  accept = 'application/vnd.github+json',
+  responseType = 'json',
+  ttl = 10 * 60 * 1000,
+  cache = true,
+} = {}) => {
+  const url = path.startsWith('http') ? path : `${API_URL}${path}`;
+  const key = cacheKey(url, token);
+  const cached = cache ? getCached(key) : undefined;
+  if (cached !== undefined) return cached;
+  if (pendingRequests.has(key)) return pendingRequests.get(key);
+
+  const request = fetch(url, {
+    headers: {
+      Accept: accept,
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      'X-GitHub-Api-Version': '2022-11-28',
+    },
+  }).then(async (response) => {
+    if (!response.ok) {
+      const resetHeader = Number(response.headers.get('x-ratelimit-reset'));
+      const resetAt = resetHeader ? new Date(resetHeader * 1000) : null;
+      const isLimited = response.status === 403 || response.status === 429;
+      throw new GitHubApiError(
+        isLimited ? 'GitHub request limit reached.' : `GitHub returned ${response.status}.`,
+        response.status,
+        resetAt,
+      );
+    }
+    const value = responseType === 'text' ? await response.text() : await response.json();
+    if (cache) setCached(key, value, ttl);
+    return value;
+  }).finally(() => pendingRequests.delete(key));
+
+  pendingRequests.set(key, request);
+  return request;
+};
+
+export const searchRepositories = async ({ query, page = 1 }, token, options = {}) => {
+  const params = new URLSearchParams({
+    q: query,
+    per_page: String(options.resultsPerQuery || 40),
+    page: String(page),
+  });
+  const data = await githubRequest(`/search/repositories?${params}`, {
+    token,
+    ttl: (options.searchCacheMinutes ?? 15) * 60 * 1000,
+    cache: options.requestCacheEnabled ?? true,
+  });
+  return data.items || [];
+};
+
+// Search requests are deliberately sequential. Parallel calls are faster for a
+// moment, but are more likely to trigger GitHub's secondary rate limiter.
+export const searchRepositoryBatch = async (plan, token, options = {}) => {
+  if (options.sequentialSearches === false) {
+    return Promise.all(plan.map(async (request) => ({
+      ...request,
+      items: await searchRepositories(request, token, options),
+    })));
+  }
+
+  const results = [];
+  let lastError;
+  for (const request of plan) {
+    try {
+      const items = await searchRepositories(request, token, options);
+      results.push({ ...request, items });
+    } catch (error) {
+      lastError = error;
+      // A limit response applies to the following calls too, so stop the batch.
+      if (error.status === 403 || error.status === 429) break;
+    }
+  }
+  if (!results.length && lastError) throw lastError;
+  return results;
+};
+
+export const getReadme = (repo, token, options = {}) => githubRequest(
+  `/repos/${repo.owner.login}/${repo.name}/readme`,
+  {
+    token,
+    accept: 'application/vnd.github.raw+json',
+    responseType: 'text',
+    ttl: (options.contentCacheMinutes ?? 60) * 60 * 1000,
+    cache: options.requestCacheEnabled ?? true,
+  },
+).catch((error) => {
+  if (error.status === 404) return null;
+  throw error;
+});
+
+export const getRepoTree = async (repo, token, options = {}) => {
+  const branch = encodeURIComponent(repo.default_branch || 'main');
+  const data = await githubRequest(
+    `/repos/${repo.owner.login}/${repo.name}/git/trees/${branch}?recursive=1`,
+    {
+      token,
+      ttl: (options.contentCacheMinutes ?? 60) * 60 * 1000,
+      cache: options.requestCacheEnabled ?? true,
+    },
+  );
+  return (data.tree || []).filter((item) => item.type === 'blob');
+};
+
+export const getFileContent = (repo, path, token, options = {}) => {
+  const encodedPath = path.split('/').map(encodeURIComponent).join('/');
+  const ref = encodeURIComponent(repo.default_branch || 'main');
+  return githubRequest(
+    `/repos/${repo.owner.login}/${repo.name}/contents/${encodedPath}?ref=${ref}`,
+    {
+      token,
+      accept: 'application/vnd.github.raw+json',
+      responseType: 'text',
+      ttl: (options.contentCacheMinutes ?? 60) * 60 * 1000,
+      cache: options.requestCacheEnabled ?? true,
+    },
+  );
 };

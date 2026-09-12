@@ -1,107 +1,146 @@
-import React from 'react';
-import { X, Moon, Sun, Eye, EyeOff, Palette } from 'lucide-react';
-import { useSettings } from '../context/SettingsContext';
+import { useEffect, useState } from 'react';
+import { Bug, KeyRound, RotateCcw, X } from 'lucide-react';
 import { useToken } from '../context/TokenContext';
+import { useDebugSettings } from '../context/DebugContext';
+import { clearPreferences, getPreferenceStats } from '../utils/recommendations';
+
+const NumberSetting = ({ label, setting, value, min, max, step = 1, onChange }) => (
+  <label className="debug-field">
+    <span>{label}</span>
+    <input
+      type="number"
+      value={value}
+      min={min}
+      max={max}
+      step={step}
+      onChange={(event) => {
+        const number = Number(event.target.value);
+        if (Number.isFinite(number)) onChange(setting, Math.min(max, Math.max(min, number)));
+      }}
+    />
+  </label>
+);
+
+const ToggleSetting = ({ label, checked, onChange }) => (
+  <label className="toggle-setting">
+    <span>{label}</span>
+    <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />
+  </label>
+);
 
 const SettingsModal = ({ isOpen, onClose }) => {
-  const { settings, updateSetting } = useSettings();
-  const { token, setToken } = useToken();
+  const { token, setToken, clearToken } = useToken();
+  const { debugSettings, updateDebugSetting, resetDebugSettings } = useDebugSettings();
+  const [draft, setDraft] = useState(token || '');
+  const [stats, setStats] = useState(getPreferenceStats);
+
+  useEffect(() => {
+    if (!isOpen) return undefined;
+    setDraft(token || '');
+    setStats(getPreferenceStats());
+    const closeOnEscape = (event) => event.key === 'Escape' && onClose();
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [isOpen, onClose, token]);
 
   if (!isOpen) return null;
 
-  const colors = [
-    { name: 'blue', class: 'bg-blue-500' },
-    { name: 'purple', class: 'bg-purple-500' },
-    { name: 'green', class: 'bg-green-500' },
-    { name: 'orange', class: 'bg-orange-500' },
-    { name: 'pink', class: 'bg-pink-500' },
-  ];
+  const saveToken = () => {
+    const value = draft.trim();
+    if (value) setToken(value);
+    else clearToken();
+  };
+
+  const resetLearning = () => {
+    clearPreferences();
+    setStats({ likes: 0, dislikes: 0 });
+  };
+
+  const numberField = (label, setting, min, max, step) => (
+    <NumberSetting
+      label={label}
+      setting={setting}
+      value={debugSettings[setting]}
+      min={min}
+      max={max}
+      step={step}
+      onChange={updateDebugSetting}
+    />
+  );
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
-      <div className="bg-[#1a1a1a] text-white rounded-xl w-full max-w-md border border-gray-800 shadow-2xl overflow-hidden">
-        <div className="flex justify-between items-center p-4 border-b border-gray-800">
-          <h2 className="text-xl font-bold">Settings</h2>
-          <button onClick={onClose} className="p-1 hover:bg-gray-800 rounded-full">
-            <X size={24} />
-          </button>
-        </div>
-        
-        <div className="p-6 space-y-8">
-          {/* GitHub Token */}
-          <div className="space-y-2">
-            <label className="block text-sm font-medium text-gray-400">GitHub Token (Optional)</label>
-            <input
-              type="password"
-              value={token || ''}
-              onChange={(e) => setToken(e.target.value)}
-              placeholder="ghp_..."
-              className="w-full bg-black/50 border border-gray-700 rounded-lg px-4 py-2 focus:outline-none focus:border-blue-500 transition-colors"
+    <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
+      <section className="modal" role="dialog" aria-modal="true" aria-labelledby="settings-title" onMouseDown={(event) => event.stopPropagation()}>
+        <header>
+          <div>
+            <div className="eyebrow">Preferences</div>
+            <h2 id="settings-title">Settings</h2>
+          </div>
+          <button className="icon-button" onClick={onClose} aria-label="Close settings"><X size={19} /></button>
+        </header>
+
+        <div className="modal-body">
+          <div className="setting-group">
+            <label htmlFor="github-token"><KeyRound size={16} /> GitHub token</label>
+            <p>Optional. It raises GitHub&apos;s request allowance and stays in this browser.</p>
+            <div className="input-row">
+              <input id="github-token" type="password" value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="github_pat_…" />
+              <button className="primary-button" onClick={saveToken}>Save</button>
+            </div>
+          </div>
+
+          <div className="setting-group">
+            <label>Recommendations</label>
+            <p>{stats.likes} liked · {stats.dislikes} disliked. Feedback never leaves this browser.</p>
+            <button className="secondary-button" onClick={resetLearning}><RotateCcw size={16} /> Reset learning</button>
+          </div>
+
+          <div className="setting-group debug-settings">
+            <ToggleSetting
+              label={<><Bug size={16} /> Debug controls</>}
+              checked={debugSettings.enabled}
+              onChange={(value) => updateDebugSetting('enabled', value)}
             />
-            <p className="text-xs text-gray-500">
-              Add a token to increase API rate limits and access private repos.
-            </p>
-          </div>
+            <p>Advanced values apply to future requests. Defaults are restored whenever debug controls are off.</p>
 
-          {/* Theme */}
-          <div className="space-y-3">
-            <label className="block text-sm font-medium text-gray-400">Appearance</label>
-            <div className="flex gap-2 bg-black/30 p-1 rounded-lg border border-gray-800">
-              <button
-                onClick={() => updateSetting('theme', 'dark')}
-                className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-md transition-all ${
-                  settings.theme === 'dark' ? 'bg-gray-700 text-white shadow' : 'text-gray-400 hover:text-white'
-                }`}
-              >
-                <Moon size={18} /> Dark
-              </button>
-              <button
-                onClick={() => updateSetting('theme', 'light')}
-                className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-md transition-all ${
-                  settings.theme === 'light' ? 'bg-gray-200 text-black shadow' : 'text-gray-400 hover:text-white'
-                }`}
-              >
-                <Sun size={18} /> Light
-              </button>
-            </div>
-          </div>
+            {debugSettings.enabled && (
+              <div className="debug-panel">
+                <div className="debug-section">
+                  <h3>Loading and API</h3>
+                  <div className="debug-grid">
+                    {numberField('README wait (ms)', 'lazyLoadDelayMs', 0, 10000, 50)}
+                    {numberField('Queries per batch', 'batchQueryCount', 1, 4)}
+                    {numberField('Results per query', 'resultsPerQuery', 5, 100, 5)}
+                    {numberField('Refill threshold', 'prefetchThreshold', 1, 50)}
+                    {numberField('Search cache (min)', 'searchCacheMinutes', 0, 1440)}
+                    {numberField('Content cache (min)', 'contentCacheMinutes', 0, 1440)}
+                  </div>
+                  <ToggleSetting label="Cache requests" checked={debugSettings.requestCacheEnabled} onChange={(value) => updateDebugSetting('requestCacheEnabled', value)} />
+                  <ToggleSetting label="Run searches sequentially" checked={debugSettings.sequentialSearches} onChange={(value) => updateDebugSetting('sequentialSearches', value)} />
+                </div>
 
-          {/* Accent Color */}
-          <div className="space-y-3">
-            <label className="block text-sm font-medium text-gray-400 flex items-center gap-2">
-              <Palette size={16} /> Accent Color
-            </label>
-            <div className="flex gap-3">
-              {colors.map((color) => (
-                <button
-                  key={color.name}
-                  onClick={() => updateSetting('accentColor', color.name)}
-                  className={`w-8 h-8 rounded-full ${color.class} transition-transform hover:scale-110 ${
-                    settings.accentColor === color.name ? 'ring-2 ring-white ring-offset-2 ring-offset-[#1a1a1a]' : ''
-                  }`}
-                />
-              ))}
-            </div>
-          </div>
+                <div className="debug-section">
+                  <h3>Recommendations</h3>
+                  <div className="debug-grid">
+                    {numberField('Explore (%)', 'explorePercent', 0, 100)}
+                    {numberField('Rocchio α', 'rocchioAlpha', 0, 5, 0.05)}
+                    {numberField('Rocchio β', 'rocchioBeta', 0, 5, 0.05)}
+                    {numberField('Generic penalty', 'genericPenalty', 0, 1, 0.05)}
+                    {numberField('Likes before tuning', 'minLikes', 1, 20)}
+                    {numberField('Query bundles', 'maxBundles', 1, 5)}
+                    {numberField('Bundle companions', 'bundleCompanions', 0, 4)}
+                    {numberField('Negative filters', 'negativeFilters', 0, 5)}
+                    {numberField('Minimum stars', 'minimumStars', 0, 100000)}
+                    {numberField('Maximum stars', 'maximumStars', 10, 1000000, 10)}
+                  </div>
+                </div>
 
-          {/* File Explorer Options */}
-          <div className="space-y-3">
-            <label className="block text-sm font-medium text-gray-400">File Explorer</label>
-            <button
-              onClick={() => updateSetting('hideConfig', !settings.hideConfig)}
-              className="w-full flex items-center justify-between p-3 bg-black/30 rounded-lg border border-gray-800 hover:bg-black/50 transition-colors"
-            >
-              <span className="flex items-center gap-2">
-                {settings.hideConfig ? <EyeOff size={18} className="text-gray-400" /> : <Eye size={18} className="text-blue-400" />}
-                <span>Hide config & build files</span>
-              </span>
-              <div className={`w-10 h-5 rounded-full relative transition-colors ${settings.hideConfig ? 'bg-blue-600' : 'bg-gray-700'}`}>
-                <div className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-all ${settings.hideConfig ? 'left-6' : 'left-1'}`} />
+                <button className="secondary-button" onClick={resetDebugSettings}><RotateCcw size={16} /> Restore debug defaults</button>
               </div>
-            </button>
+            )}
           </div>
         </div>
-      </div>
+      </section>
     </div>
   );
 };
